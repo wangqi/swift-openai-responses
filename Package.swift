@@ -20,7 +20,7 @@ let package = Package(
 		.package(url: "https://github.com/SwiftyLab/MetaCodable.git", from: "1.0.0"),
 		.package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.1.0"),
 		.package(url: "https://github.com/pointfreeco/swift-macro-testing", from: "0.6.0"),
-		.package(url: "https://github.com/m1guelpf/EventSource.git", branch: "compiler-fix"),
+        .package(name: "M1guelEventSource", url: "https://github.com/m1guelpf/EventSource.git", branch: "compiler-fix"),
 		.package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.1"..<"603.0.0"),
 	],
 	targets: [
@@ -28,7 +28,7 @@ let package = Package(
 			name: "ResponsesAPI",
 			dependencies: [
 				"Macros",
-				.product(name: "EventSource", package: "EventSource"),
+				.product(name: "EventSource", package: "M1guelEventSource"),
 				.product(name: "MetaCodable", package: "MetaCodable"),
 				.product(name: "HelperCoders", package: "MetaCodable"),
 			],
