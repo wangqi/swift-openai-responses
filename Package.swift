@@ -4,7 +4,7 @@ import PackageDescription
 import CompilerPluginSupport
 
 let package = Package(
-	name: "ResponsesAPI",
+	name: "OpenAIResponses",
 	platforms: [
 		.iOS(.v17),
 		.tvOS(.v17),
@@ -14,21 +14,21 @@ let package = Package(
 		.macCatalyst(.v17),
 	],
 	products: [
-		.library(name: "ResponsesAPI", targets: ["ResponsesAPI"]),
+		.library(name: "OpenAIResponses", targets: ["OpenAIResponses"]),
 	],
 	dependencies: [
 		.package(url: "https://github.com/SwiftyLab/MetaCodable.git", from: "1.0.0"),
 		.package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.1.0"),
 		.package(url: "https://github.com/pointfreeco/swift-macro-testing", from: "0.6.0"),
-        .package(name: "M1guelEventSource", url: "https://github.com/m1guelpf/EventSource.git", branch: "compiler-fix"),
+        .package(path: "../RecouseEventSource"),
 		.package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.1"..<"603.0.0"),
 	],
 	targets: [
 		.target(
-			name: "ResponsesAPI",
+			name: "OpenAIResponses",
 			dependencies: [
 				"Macros",
-				.product(name: "EventSource", package: "M1guelEventSource"),
+				.product(name: "RecouseEventSource", package: "RecouseEventSource"),
 				.product(name: "MetaCodable", package: "MetaCodable"),
 				.product(name: "HelperCoders", package: "MetaCodable"),
 			],
@@ -48,7 +48,7 @@ let package = Package(
 		.testTarget(
 			name: "Tests",
 			dependencies: [
-				"ResponsesAPI", "Macros",
+				"OpenAIResponses", "Macros",
 				.product(name: "MacroTesting", package: "swift-macro-testing"),
 				.product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
 			],

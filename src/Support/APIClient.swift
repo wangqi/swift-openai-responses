@@ -1,5 +1,5 @@
 import Foundation
-import EventSource
+import RecouseEventSource
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
