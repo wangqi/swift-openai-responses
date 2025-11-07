@@ -130,10 +130,14 @@ public struct APIClient: Sendable {
 		return decoder
 	}()
 
+	// wangqi 2025-11-07: Add middleware support for debugging
+	private let middlewares: [ResponsesMiddlewareProtocol]
+
 	/// Creates a new `APIClient` instance using the provided `URLRequest`.
 	///
 	/// - Parameter request: The `URLRequest` to use for the API.
-	init(connectingTo request: URLRequest) throws(Error) {
+	/// - Parameter middlewares: Optional array of middleware for intercepting requests/responses
+	init(connectingTo request: URLRequest, middlewares: [ResponsesMiddlewareProtocol] = []) throws(Error) {
 		guard let url = request.url else { throw Error.invalidRequest(request) }
 
 		var request = request
@@ -142,6 +146,7 @@ public struct APIClient: Sendable {
 		}
 
 		self.request = request
+		self.middlewares = middlewares  // wangqi 2025-11-07
 	}
 
 	/// Creates a new `ResponsesAPI` instance using OpenAI API credentials.
@@ -149,7 +154,8 @@ public struct APIClient: Sendable {
 	/// - Parameter authToken: The OpenAI API key to use for authentication.
 	/// - Parameter organizationId: The [organization](https://platform.openai.com/docs/guides/production-best-practices#setting-up-your-organization) associated with the request.
 	/// - Parameter projectId: The project associated with the request.
-	init(authToken: String, organizationId: String? = nil, projectId: String? = nil) {
+	/// - Parameter middlewares: Optional array of middleware for intercepting requests/responses
+	init(authToken: String, organizationId: String? = nil, projectId: String? = nil, middlewares: [ResponsesMiddlewareProtocol] = []) {
 		var request = URLRequest(url: URL(string: "https://api.openai.com/")!)
 
 		request.addValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
@@ -157,6 +163,7 @@ public struct APIClient: Sendable {
 		if let organizationId { request.addValue(organizationId, forHTTPHeaderField: "OpenAI-Organization") }
 
 		self.request = request
+		self.middlewares = middlewares  // wangqi 2025-11-07
 	}
 
 	func send<R: Decodable>(expecting _: R.Type, configuring requestBuilder: (inout URLRequest, JSONEncoder) throws -> Void) async throws -> R {
@@ -181,20 +188,41 @@ public struct APIClient: Sendable {
 	///
 	/// - Throws: If the request fails to send or has a non-200 status code.
 	private func send(request: URLRequest) async throws -> Data {
-		let (data, res) = try await URLSession.shared.data(for: request)
-
-		guard let res = res as? HTTPURLResponse else { throw Error.invalidResponse(res) }
-		guard res.statusCode != 200 else { return data }
-
-		if let response = try? decoder.decode(Response.ErrorResponse.self, from: data) {
-			throw response.error
+		// wangqi 2025-11-07: Intercept outgoing request
+		var interceptedRequest = request
+		for middleware in middlewares {
+			interceptedRequest = middleware.intercept(request: interceptedRequest)
 		}
 
-		throw Error.invalidResponse(res)
+		let (data, res) = try await URLSession.shared.data(for: interceptedRequest)
+
+		guard let res = res as? HTTPURLResponse else { throw Error.invalidResponse(res) }
+
+		// wangqi 2025-11-07: Intercept response
+		var interceptedData = data
+		for middleware in middlewares {
+			let result = middleware.intercept(response: res, request: interceptedRequest, data: interceptedData)
+			interceptedData = result.data ?? data
+		}
+
+		guard res.statusCode == 200 else {
+			if let response = try? decoder.decode(Response.ErrorResponse.self, from: interceptedData) {
+				throw response.error
+			}
+			throw Error.invalidResponse(res)
+		}
+
+		return interceptedData
 	}
 
 	private func sseStream<T: Decodable & Sendable>(of _: T.Type, request: URLRequest) async throws -> AsyncThrowingStream<T, Swift.Error> {
 		let (stream, continuation) = AsyncThrowingStream.makeStream(of: T.self)
+
+		// wangqi 2025-11-07: Intercept outgoing request
+		var interceptedRequest = request
+		for middleware in middlewares {
+			interceptedRequest = middleware.intercept(request: interceptedRequest)
+		}
 
 		let task = Task {
 			defer {
@@ -202,7 +230,7 @@ public struct APIClient: Sendable {
 				continuation.finish()
 			}
 
-			let dataTask = eventSource.dataTask(for: request)
+			let dataTask = eventSource.dataTask(for: interceptedRequest)
 			defer { dataTask.cancel(urlSession: URLSession.shared) }
 
 			print("[APIClient.sseStream] Starting event stream for \(T.self)")
@@ -217,6 +245,18 @@ public struct APIClient: Sendable {
 
 					// wangqi 2025-11-07: Try to extract error details from connection errors
 					if case let .connectionError(statusCode, responseData) = error as? RecouseEventSource.EventSourceError {
+						// wangqi 2025-11-07: Intercept errors
+						let httpResponse = HTTPURLResponse(
+							url: interceptedRequest.url!,
+							statusCode: statusCode,
+							httpVersion: nil,
+							headerFields: nil
+						)
+
+						for middleware in self.middlewares {
+							middleware.interceptError(response: httpResponse, request: interceptedRequest, data: responseData, error: error)
+						}
+
 						if let errorString = String(data: responseData, encoding: .utf8) {
 							print("[APIClient.sseStream] Server error (HTTP \(statusCode)): \(errorString)")
 						}
@@ -242,8 +282,21 @@ public struct APIClient: Sendable {
 					continue
 				}
 
-				print("[APIClient.sseStream] Event #\(eventCount): Decoding \(data.count) bytes")
-				continuation.yield(with: Result { try decoder.decode(T.self, from: data) })
+				// wangqi 2025-11-07: Intercept streaming data
+				var interceptedData = data
+				for middleware in self.middlewares {
+					interceptedData = middleware.interceptStreamingData(request: interceptedRequest, interceptedData)
+				}
+
+				// wangqi 2025-11-07: Intercept SSE event string
+				if let eventString = event.data {
+					for middleware in self.middlewares {
+						_ = middleware.interceptStreamingEvent(request: interceptedRequest, eventString)
+					}
+				}
+
+				print("[APIClient.sseStream] Event #\(eventCount): Decoding \(interceptedData.count) bytes")
+				continuation.yield(with: Result { try decoder.decode(T.self, from: interceptedData) })
 
 				try Task.checkCancellation()
 			}

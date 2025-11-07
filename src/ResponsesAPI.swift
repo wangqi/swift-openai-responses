@@ -12,8 +12,9 @@ public struct ResponsesAPI: Sendable {
 	/// You can use this initializer to use a custom base URL or custom headers.
 	///
 	/// - Parameter request: The `URLRequest` to use for the API.
-	public init(connectingTo request: URLRequest) throws(APIClient.Error) {
-		client = try APIClient(connectingTo: request)
+	/// - Parameter middlewares: Optional array of middleware for intercepting requests/responses
+	public init(connectingTo request: URLRequest, middlewares: [ResponsesMiddlewareProtocol] = []) throws(APIClient.Error) {
+		client = try APIClient(connectingTo: request, middlewares: middlewares)
 	}
 
 	/// Creates a new `ResponsesAPI` instance using the provided `authToken`.
@@ -23,8 +24,9 @@ public struct ResponsesAPI: Sendable {
 	/// - Parameter authToken: The OpenAI API key to use for authentication.
 	/// - Parameter organizationId: The [organization](https://platform.openai.com/docs/guides/production-best-practices#setting-up-your-organization) associated with the request.
 	/// - Parameter projectId: The project associated with the request.
-	public init(authToken: String, organizationId: String? = nil, projectId: String? = nil) {
-		client = APIClient(authToken: authToken, organizationId: organizationId, projectId: projectId)
+	/// - Parameter middlewares: Optional array of middleware for intercepting requests/responses
+	public init(authToken: String, organizationId: String? = nil, projectId: String? = nil, middlewares: [ResponsesMiddlewareProtocol] = []) {
+		client = APIClient(authToken: authToken, organizationId: organizationId, projectId: projectId, middlewares: middlewares)
 	}
 
 	/// Creates a model response.
