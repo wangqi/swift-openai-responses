@@ -4,6 +4,104 @@ import RecouseEventSource
 import FoundationNetworking
 #endif
 
+// wangqi 2025-11-07: Custom decoder that provides default values for missing keys
+// This allows the Response model to work with streaming events that don't include all fields
+private class LenientJSONDecoder: JSONDecoder {
+	override func decode<T>(_ type: T.Type, from data: Data) throws -> T where T : Decodable {
+		// Pre-patch the JSON before any decoding attempts
+		let patchedData = try patchJSONData(data)
+		return try super.decode(type, from: patchedData)
+	}
+
+	private func patchJSONData(_ data: Data) throws -> Data {
+		guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+			// If it's not a dictionary, return as-is
+			return data
+		}
+
+		// wangqi 2025-11-07: Recursively patch all nested dictionaries and arrays
+		patchRecursively(&json)
+
+		return try JSONSerialization.data(withJSONObject: json)
+	}
+
+	private func patchRecursively(_ object: inout [String: Any]) {
+		// wangqi 2025-11-07: First, recursively patch existing nested structures BEFORE adding defaults
+		// This prevents infinite loops from processing newly-added default values
+		let originalKeys = Set(object.keys)
+		for key in originalKeys {
+			guard let value = object[key] else { continue }
+
+			if var nestedDict = value as? [String: Any] {
+				patchRecursively(&nestedDict)
+				object[key] = nestedDict
+			} else if var nestedArray = value as? [[String: Any]] {
+				for i in 0..<nestedArray.count {
+					patchRecursively(&nestedArray[i])
+				}
+				object[key] = nestedArray
+			}
+		}
+
+		// wangqi 2025-11-07: Now apply defaults for missing keys (after recursion is done)
+		let defaults: [String: Any] = [
+			// Response-level fields
+			"metadata": [:],
+			"parallel_tool_calls": true,
+			"temperature": 1.0,
+			"top_p": 1.0,
+			"store": true,
+			"tool_choice": "auto",
+			"tools": [],
+			"truncation": "auto",
+
+			// Text config fields
+			"format": ["type": "text"],
+
+			// Usage details
+			"input_tokens_details": ["cached_tokens": 0],
+			"output_tokens_details": ["reasoning_tokens": 0],
+
+			// Content part fields
+			"annotations": [],
+			"logprobs": [], // Empty array, not null
+
+			// Output item fields
+			"content": [],
+			"status": "completed"
+		]
+
+		// wangqi 2025-11-07: Detect if this is a Response object by checking for response-specific fields
+		let isResponseObject = object["model"] != nil || object["status"] != nil || object["output"] != nil
+
+		// Apply defaults for missing keys
+		for (key, defaultValue) in defaults {
+			// Skip 'text' for now - handle it specially below
+			if key == "text" { continue }
+
+			if object[key] == nil {
+				object[key] = defaultValue
+			}
+		}
+
+		// wangqi 2025-11-07: Special handling for text config - only add to Response objects
+		if isResponseObject && object["text"] == nil {
+			object["text"] = ["format": ["type": "text"]]
+		} else if var text = object["text"] as? [String: Any] {
+			if text["format"] == nil {
+				text["format"] = ["type": "text"]
+				object["text"] = text
+			}
+		}
+
+		// Special handling for truncation - normalize dict to string
+		if let truncationDict = object["truncation"] as? [String: Any],
+		   let type = truncationDict["type"] as? String {
+			object["truncation"] = type
+		}
+	}
+}
+
 public struct APIClient: Sendable {
 	public enum Error: Swift.Error {
 		/// The provided request is invalid.
@@ -14,9 +112,14 @@ public struct APIClient: Sendable {
 	}
 
 	private let request: URLRequest
-	private let eventSource = EventSource(mode: .dataOnly)
+	private let eventSource = EventSource(mode: .default) // wangqi 2025-11-07: Changed from .dataOnly to properly parse SSE events
 	private let encoder = tap(JSONEncoder()) { $0.dateEncodingStrategy = .iso8601 }
-	private let decoder = tap(JSONDecoder()) { $0.dateDecodingStrategy = .iso8601 }
+	private let decoder: JSONDecoder = {
+		// wangqi 2025-11-07: Use lenient decoder that handles missing fields gracefully
+		let decoder = LenientJSONDecoder()
+		decoder.dateDecodingStrategy = .iso8601
+		return decoder
+	}()
 
 	/// Creates a new `APIClient` instance using the provided `URLRequest`.
 	///
@@ -85,18 +188,38 @@ public struct APIClient: Sendable {
 		let (stream, continuation) = AsyncThrowingStream.makeStream(of: T.self)
 
 		let task = Task {
-			defer { continuation.finish() }
+			defer {
+				print("[APIClient] sseStream: Task finishing, calling continuation.finish()")
+				continuation.finish()
+			}
 
 			let dataTask = eventSource.dataTask(for: request)
 			defer { dataTask.cancel(urlSession: URLSession.shared) }
 
+			print("[APIClient] sseStream: Starting to iterate events from dataTask...")
+			var eventIndex = 0
 			for await event in dataTask.events() {
-				guard case let .event(event) = event, let data = event.data?.data(using: .utf8) else { continue }
+				eventIndex += 1
+				print("[APIClient] sseStream: Received event #\(eventIndex), type=\(event)")
 
+				guard case let .event(event) = event else {
+					print("[APIClient] sseStream: Event #\(eventIndex) is not .event type, continuing...")
+					continue
+				}
+
+				print("[APIClient] sseStream: Event #\(eventIndex) data field: \(event.data ?? "nil")")
+
+				guard let data = event.data?.data(using: .utf8) else {
+					print("[APIClient] sseStream: Event #\(eventIndex) has no data, continuing...")
+					continue
+				}
+
+				print("[APIClient] sseStream: Event #\(eventIndex) attempting to decode \(data.count) bytes")
 				continuation.yield(with: Result { try decoder.decode(T.self, from: data) })
 
 				try Task.checkCancellation()
 			}
+			print("[APIClient] sseStream: Event iteration completed")
 		}
 
 		continuation.onTermination = { _ in
