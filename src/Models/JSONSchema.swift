@@ -171,8 +171,21 @@ extension JSONSchema: Codable {
 		}
 
 		if type == "object" {
-			self = try .object(
-				properties: container.decode([String: JSONSchema].self, forKey: .properties),
+			// wangqi 2025-11-07: Make properties decoding more robust to handle malformed JSON from server
+			// Some servers may incorrectly include non-schema values in properties (e.g., "tool_choice": "auto")
+			// We decode properties manually and skip any entries that cannot be decoded as JSONSchema
+			var properties: [String: JSONSchema] = [:]
+			if let propertiesContainer = try? container.nestedContainer(keyedBy: DynamicCodingKeys.self, forKey: .properties) {
+				for key in propertiesContainer.allKeys {
+					if let value = try? propertiesContainer.decode(JSONSchema.self, forKey: key) {
+						properties[key.stringValue] = value
+					}
+					// Skip properties that cannot be decoded as JSONSchema
+				}
+			}
+
+			self = .object(
+				properties: properties,
 				description: description
 			)
 			return
@@ -227,5 +240,21 @@ extension JSONSchema: Codable {
 		}
 
 		throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unsupported schema type")
+	}
+}
+
+// wangqi 2025-11-07: Add DynamicCodingKeys to support decoding properties with unknown keys
+private struct DynamicCodingKeys: CodingKey {
+	var stringValue: String
+	var intValue: Int?
+
+	init?(stringValue: String) {
+		self.stringValue = stringValue
+		self.intValue = nil
+	}
+
+	init?(intValue: Int) {
+		self.stringValue = "\(intValue)"
+		self.intValue = intValue
 	}
 }
