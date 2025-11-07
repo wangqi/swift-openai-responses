@@ -4,30 +4,55 @@ import RecouseEventSource
 import FoundationNetworking
 #endif
 
-// wangqi 2025-11-07: Custom decoder that provides default values for missing keys
-// This allows the Response model to work with streaming events that don't include all fields
+// wangqi 2025-11-07: Custom decoder that provides default values for missing keys.
+// This allows the Response model to work with streaming events that don't include all fields,
+// which is common when different API providers (OpenAI, LM Studio, etc.) send partial responses.
 private class LenientJSONDecoder: JSONDecoder {
+	// wangqi 2025-11-07: Default values for commonly missing fields in OpenAI Responses API
+	// Using nonisolated(unsafe) because this is a constant dictionary that's never modified
+	private static nonisolated(unsafe) let defaults: [String: Any] = [
+		// Response-level fields
+		"metadata": [:],
+		"parallel_tool_calls": true,
+		"temperature": 1.0,
+		"top_p": 1.0,
+		"store": true,
+		"tool_choice": "auto",
+		"tools": [],
+		"truncation": "auto",
+
+		// Text config fields
+		"format": ["type": "text"],
+
+		// Usage details
+		"input_tokens_details": ["cached_tokens": 0],
+		"output_tokens_details": ["reasoning_tokens": 0],
+
+		// Content part fields
+		"annotations": [],
+		"logprobs": [],
+
+		// Output item fields
+		"content": [],
+		"status": "completed"
+	]
+
 	override func decode<T>(_ type: T.Type, from data: Data) throws -> T where T : Decodable {
-		// Pre-patch the JSON before any decoding attempts
 		let patchedData = try patchJSONData(data)
 		return try super.decode(type, from: patchedData)
 	}
 
 	private func patchJSONData(_ data: Data) throws -> Data {
 		guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-			// If it's not a dictionary, return as-is
 			return data
 		}
 
-		// wangqi 2025-11-07: Recursively patch all nested dictionaries and arrays
 		patchRecursively(&json)
-
 		return try JSONSerialization.data(withJSONObject: json)
 	}
 
 	private func patchRecursively(_ object: inout [String: Any]) {
-		// wangqi 2025-11-07: First, recursively patch existing nested structures BEFORE adding defaults
-		// This prevents infinite loops from processing newly-added default values
+		// wangqi 2025-11-07: Process existing nested structures first to avoid infinite loops
 		let originalKeys = Set(object.keys)
 		for key in originalKeys {
 			guard let value = object[key] else { continue }
@@ -43,58 +68,42 @@ private class LenientJSONDecoder: JSONDecoder {
 			}
 		}
 
-		// wangqi 2025-11-07: Now apply defaults for missing keys (after recursion is done)
-		let defaults: [String: Any] = [
-			// Response-level fields
-			"metadata": [:],
-			"parallel_tool_calls": true,
-			"temperature": 1.0,
-			"top_p": 1.0,
-			"store": true,
-			"tool_choice": "auto",
-			"tools": [],
-			"truncation": "auto",
+		// wangqi 2025-11-07: Apply defaults after recursion to avoid processing newly-added values
+		applyDefaults(to: &object)
+		normalizeSpecialFields(&object)
+	}
 
-			// Text config fields
-			"format": ["type": "text"],
-
-			// Usage details
-			"input_tokens_details": ["cached_tokens": 0],
-			"output_tokens_details": ["reasoning_tokens": 0],
-
-			// Content part fields
-			"annotations": [],
-			"logprobs": [], // Empty array, not null
-
-			// Output item fields
-			"content": [],
-			"status": "completed"
-		]
-
-		// wangqi 2025-11-07: Detect if this is a Response object by checking for response-specific fields
-		let isResponseObject = object["model"] != nil || object["status"] != nil || object["output"] != nil
-
-		// Apply defaults for missing keys
-		for (key, defaultValue) in defaults {
-			// Skip 'text' for now - handle it specially below
-			if key == "text" { continue }
-
+	private func applyDefaults(to object: inout [String: Any]) {
+		// wangqi 2025-11-07: Apply all defaults except 'text' which is handled specially
+		for (key, defaultValue) in Self.defaults {
 			if object[key] == nil {
 				object[key] = defaultValue
 			}
 		}
 
-		// wangqi 2025-11-07: Special handling for text config - only add to Response objects
+		// wangqi 2025-11-07: Handle 'text' field - only add to Response objects
+		let isResponseObject = object["model"] != nil || object["status"] != nil || object["output"] != nil
 		if isResponseObject && object["text"] == nil {
 			object["text"] = ["format": ["type": "text"]]
-		} else if var text = object["text"] as? [String: Any] {
-			if text["format"] == nil {
-				text["format"] = ["type": "text"]
-				object["text"] = text
-			}
 		}
 
-		// Special handling for truncation - normalize dict to string
+		// wangqi 2025-11-07: Clean up metadata - remove fields that might have wrong types
+		// Different providers send different metadata formats (OpenAI vs LM Studio)
+		if var metadata = object["metadata"] as? [String: Any] {
+			// Remove any non-string values from metadata since it should be [String: String]
+			metadata = metadata.filter { _, value in value is String }
+			object["metadata"] = metadata
+		}
+	}
+
+	private func normalizeSpecialFields(_ object: inout [String: Any]) {
+		// wangqi 2025-11-07: Ensure text.format exists if text exists
+		if var text = object["text"] as? [String: Any], text["format"] == nil {
+			text["format"] = ["type": "text"]
+			object["text"] = text
+		}
+
+		// wangqi 2025-11-07: Normalize truncation from dict to string (some providers send {"type": "auto"})
 		if let truncationDict = object["truncation"] as? [String: Any],
 		   let type = truncationDict["type"] as? String {
 			object["truncation"] = type
@@ -189,37 +198,57 @@ public struct APIClient: Sendable {
 
 		let task = Task {
 			defer {
-				print("[APIClient] sseStream: Task finishing, calling continuation.finish()")
+				print("[APIClient.sseStream] Stream closed")
 				continuation.finish()
 			}
 
 			let dataTask = eventSource.dataTask(for: request)
 			defer { dataTask.cancel(urlSession: URLSession.shared) }
 
-			print("[APIClient] sseStream: Starting to iterate events from dataTask...")
-			var eventIndex = 0
+			print("[APIClient.sseStream] Starting event stream for \(T.self)")
+			var eventCount = 0
+
 			for await event in dataTask.events() {
-				eventIndex += 1
-				print("[APIClient] sseStream: Received event #\(eventIndex), type=\(event)")
+				eventCount += 1
+
+				// wangqi 2025-11-07: Handle error events from the server
+				if case let .error(error) = event {
+					print("[APIClient.sseStream] Event #\(eventCount): Error - \(error)")
+
+					// wangqi 2025-11-07: Try to extract error details from connection errors
+					if case let .connectionError(statusCode, responseData) = error as? RecouseEventSource.EventSourceError {
+						if let errorString = String(data: responseData, encoding: .utf8) {
+							print("[APIClient.sseStream] Server error (HTTP \(statusCode)): \(errorString)")
+						}
+
+						// wangqi 2025-11-07: Try to decode as OpenAI error response
+						if let errorResponse = try? decoder.decode(Response.ErrorResponse.self, from: responseData) {
+							continuation.finish(throwing: errorResponse.error)
+							return
+						}
+					}
+
+					continuation.finish(throwing: error)
+					return
+				}
 
 				guard case let .event(event) = event else {
-					print("[APIClient] sseStream: Event #\(eventIndex) is not .event type, continuing...")
+					print("[APIClient.sseStream] Event #\(eventCount): Skipped (type: \(event))")
 					continue
 				}
-
-				print("[APIClient] sseStream: Event #\(eventIndex) data field: \(event.data ?? "nil")")
 
 				guard let data = event.data?.data(using: .utf8) else {
-					print("[APIClient] sseStream: Event #\(eventIndex) has no data, continuing...")
+					print("[APIClient.sseStream] Event #\(eventCount): No data field")
 					continue
 				}
 
-				print("[APIClient] sseStream: Event #\(eventIndex) attempting to decode \(data.count) bytes")
+				print("[APIClient.sseStream] Event #\(eventCount): Decoding \(data.count) bytes")
 				continuation.yield(with: Result { try decoder.decode(T.self, from: data) })
 
 				try Task.checkCancellation()
 			}
-			print("[APIClient] sseStream: Event iteration completed")
+
+			print("[APIClient.sseStream] Completed with \(eventCount) events")
 		}
 
 		continuation.onTermination = { _ in
