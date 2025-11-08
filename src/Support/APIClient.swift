@@ -295,7 +295,7 @@ public struct APIClient: Sendable {
 					}
 				}
 
-				print("[APIClient.sseStream] Event #\(eventCount): Decoding \(interceptedData.count) bytes")
+				// print("[APIClient.sseStream] Event #\(eventCount): Decoding \(interceptedData.count) bytes")
 				continuation.yield(with: Result { try decoder.decode(T.self, from: interceptedData) })
 
 				try Task.checkCancellation()

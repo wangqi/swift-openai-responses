@@ -9831,7 +9831,7 @@ Response
             "function_call": null
           }
         ],
-        "finish_reason": "stop",
+        "": "stop",
         "model": "gpt-4o-mini-2024-07-18",
         "usage": {
           "total_tokens": 325,
