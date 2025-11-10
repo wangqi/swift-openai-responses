@@ -56,6 +56,16 @@ import MetaCodable
 				case wav
 			}
 
+			/// The video URL object containing the URL.
+			@Codable @CodingKeys(.snake_case) public struct VideoURL: Equatable, Hashable, Sendable {
+				/// The URL of the video. Can be a fully qualified URL or a data URL with base64 encoded video.
+				public let url: String
+
+				public init(url: String) {
+					self.url = url
+				}
+			}
+
 			/// A text input to the model.
 			@CodedAs("input_text") case text(_ text: String)
 
@@ -85,6 +95,10 @@ import MetaCodable
 			/// - Parameter data: Base64-encoded audio data.
 			/// - Parameter format: The format of the audio data.
 			@CodedAs("input_audio") case audio(data: String, format: AudioFormat)
+
+			/// A video input to the model. Learn about [video inputs](https://platform.openai.com/docs/guides/vision).
+			/// - Parameter videoUrl: The video URL object containing the URL of the video to be sent to the model.
+			@CodedAs("input_video") case video(videoUrl: VideoURL)
 		}
 
 		/// A text input to the model, equivalent to a text input.
