@@ -17,6 +17,32 @@ public struct ResponsesAPI: Sendable {
 		client = try APIClient(connectingTo: request, middlewares: middlewares)
 	}
 
+	// wangqi 2025-11-28: Add initializer with custom URLSession for proxy support
+	/// Creates a new `ResponsesAPI` instance using the provided `URLRequest` and custom URLSession.
+	///
+	/// You can use this initializer to use a custom base URL, custom headers, and custom URLSession for proxy debugging.
+	///
+	/// - Parameter request: The `URLRequest` to use for the API.
+	/// - Parameter session: Custom URLSession for proxy support (e.g., mitmproxy debugging)
+	/// - Parameter middlewares: Optional array of middleware for intercepting requests/responses
+	/// - Parameter urlSessionConfiguration: Optional URLSessionConfiguration for SSE streaming proxy support
+	/// - Parameter bypassSSLValidation: Whether to bypass SSL validation for proxy debugging
+	public init(
+		connectingTo request: URLRequest,
+		session: URLSession,
+		middlewares: [ResponsesMiddlewareProtocol] = [],
+		urlSessionConfiguration: URLSessionConfiguration? = nil,
+		bypassSSLValidation: Bool = false
+	) throws(APIClient.Error) {
+		client = try APIClient(
+			connectingTo: request,
+			session: session,
+			middlewares: middlewares,
+			urlSessionConfiguration: urlSessionConfiguration,
+			bypassSSLValidation: bypassSSLValidation
+		)
+	}
+
 	/// Creates a new `ResponsesAPI` instance using the provided `authToken`.
 	///
 	/// You can optionally provide an `organizationId` and/or `projectId` to use with the API.

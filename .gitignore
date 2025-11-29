@@ -7,5 +7,5 @@ xcuserdata/
 DerivedData/
 *.xcframework
 Package.resolved
-.swiftpm/configuration/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.swiftpm/
+

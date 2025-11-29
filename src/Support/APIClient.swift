@@ -121,7 +121,8 @@ public struct APIClient: Sendable {
 	}
 
 	private let request: URLRequest
-	private let eventSource = EventSource(mode: .default) // wangqi 2025-11-07: Changed from .dataOnly to properly parse SSE events
+	// wangqi 2025-11-28: Changed from constant to stored property to support proxy configuration
+	private let eventSource: EventSource
 	private let encoder = tap(JSONEncoder()) { $0.dateEncodingStrategy = .iso8601 }
 	private let decoder: JSONDecoder = {
 		// wangqi 2025-11-07: Use lenient decoder that handles missing fields gracefully
@@ -132,6 +133,9 @@ public struct APIClient: Sendable {
 
 	// wangqi 2025-11-07: Add middleware support for debugging
 	private let middlewares: [ResponsesMiddlewareProtocol]
+
+	// wangqi 2025-11-28: Add custom URLSession support for proxy debugging
+	private let session: URLSession
 
 	/// Creates a new `APIClient` instance using the provided `URLRequest`.
 	///
@@ -147,6 +151,43 @@ public struct APIClient: Sendable {
 
 		self.request = request
 		self.middlewares = middlewares  // wangqi 2025-11-07
+		self.session = URLSession.shared  // wangqi 2025-11-28: Default to shared session
+		self.eventSource = EventSource(mode: .default)  // wangqi 2025-11-28: Default EventSource
+	}
+
+	// wangqi 2025-11-28: Add initializer with custom URLSession for proxy support
+	/// Creates a new `APIClient` instance using the provided `URLRequest` and custom URLSession.
+	///
+	/// - Parameter request: The `URLRequest` to use for the API.
+	/// - Parameter session: Custom URLSession for proxy support
+	/// - Parameter middlewares: Optional array of middleware for intercepting requests/responses
+	/// - Parameter urlSessionConfiguration: Optional URLSessionConfiguration for SSE streaming proxy support
+	/// - Parameter bypassSSLValidation: Whether to bypass SSL validation for proxy debugging
+	init(
+		connectingTo request: URLRequest,
+		session: URLSession,
+		middlewares: [ResponsesMiddlewareProtocol] = [],
+		urlSessionConfiguration: URLSessionConfiguration? = nil,
+		bypassSSLValidation: Bool = false
+	) throws(Error) {
+		guard let url = request.url else { throw Error.invalidRequest(request) }
+
+		var request = request
+		if url.lastPathComponent != "/" {
+			request.url = url.appendingPathComponent("/")
+		}
+
+		self.request = request
+		self.session = session
+		self.middlewares = middlewares
+		// wangqi 2025-11-28: Create EventSource with proxy configuration for SSE streaming
+		// Use the simpler initializer that doesn't require ServerEventParser (which is internal)
+		self.eventSource = EventSource(
+			mode: .default,
+			timeoutInterval: 300,
+			urlSessionConfiguration: urlSessionConfiguration,
+			bypassSSLValidation: bypassSSLValidation
+		)
 	}
 
 	/// Creates a new `ResponsesAPI` instance using OpenAI API credentials.
@@ -164,6 +205,8 @@ public struct APIClient: Sendable {
 
 		self.request = request
 		self.middlewares = middlewares  // wangqi 2025-11-07
+		self.session = URLSession.shared  // wangqi 2025-11-28: Default to shared session
+		self.eventSource = EventSource(mode: .default)  // wangqi 2025-11-28: Default EventSource
 	}
 
 	func send<R: Decodable>(expecting _: R.Type, configuring requestBuilder: (inout URLRequest, JSONEncoder) throws -> Void) async throws -> R {
@@ -194,7 +237,8 @@ public struct APIClient: Sendable {
 			interceptedRequest = middleware.intercept(request: interceptedRequest)
 		}
 
-		let (data, res) = try await URLSession.shared.data(for: interceptedRequest)
+		// wangqi 2025-11-28: Use stored session instead of URLSession.shared for proxy support
+		let (data, res) = try await session.data(for: interceptedRequest)
 
 		guard let res = res as? HTTPURLResponse else { throw Error.invalidResponse(res) }
 
@@ -224,25 +268,19 @@ public struct APIClient: Sendable {
 			interceptedRequest = middleware.intercept(request: interceptedRequest)
 		}
 
+		// wangqi 2025-11-28: Capture session for use inside Task
+		let capturedSession = self.session
+
 		let task = Task {
-			defer {
-				print("[APIClient.sseStream] Stream closed")
-				continuation.finish()
-			}
+			defer { continuation.finish() }
 
 			let dataTask = eventSource.dataTask(for: interceptedRequest)
-			defer { dataTask.cancel(urlSession: URLSession.shared) }
-
-			print("[APIClient.sseStream] Starting event stream for \(T.self)")
-			var eventCount = 0
+			// wangqi 2025-11-28: Use captured session instead of URLSession.shared for proxy support
+			defer { dataTask.cancel(urlSession: capturedSession) }
 
 			for await event in dataTask.events() {
-				eventCount += 1
-
 				// wangqi 2025-11-07: Handle error events from the server
 				if case let .error(error) = event {
-					print("[APIClient.sseStream] Event #\(eventCount): Error - \(error)")
-
 					// wangqi 2025-11-07: Try to extract error details from connection errors
 					if case let .connectionError(statusCode, responseData) = error as? RecouseEventSource.EventSourceError {
 						// wangqi 2025-11-07: Intercept errors
@@ -257,10 +295,6 @@ public struct APIClient: Sendable {
 							middleware.interceptError(response: httpResponse, request: interceptedRequest, data: responseData, error: error)
 						}
 
-						if let errorString = String(data: responseData, encoding: .utf8) {
-							print("[APIClient.sseStream] Server error (HTTP \(statusCode)): \(errorString)")
-						}
-
 						// wangqi 2025-11-07: Try to decode as OpenAI error response
 						if let errorResponse = try? decoder.decode(Response.ErrorResponse.self, from: responseData) {
 							continuation.finish(throwing: errorResponse.error)
@@ -272,15 +306,8 @@ public struct APIClient: Sendable {
 					return
 				}
 
-				guard case let .event(event) = event else {
-					print("[APIClient.sseStream] Event #\(eventCount): Skipped (type: \(event))")
-					continue
-				}
-
-				guard let data = event.data?.data(using: .utf8) else {
-					print("[APIClient.sseStream] Event #\(eventCount): No data field")
-					continue
-				}
+				guard case let .event(event) = event else { continue }
+				guard let data = event.data?.data(using: .utf8) else { continue }
 
 				// wangqi 2025-11-07: Intercept streaming data
 				var interceptedData = data
@@ -295,13 +322,10 @@ public struct APIClient: Sendable {
 					}
 				}
 
-				// print("[APIClient.sseStream] Event #\(eventCount): Decoding \(interceptedData.count) bytes")
 				continuation.yield(with: Result { try decoder.decode(T.self, from: interceptedData) })
 
 				try Task.checkCancellation()
 			}
-
-			print("[APIClient.sseStream] Completed with \(eventCount) events")
 		}
 
 		continuation.onTermination = { _ in
